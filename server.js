@@ -1,92 +1,187 @@
 const express = require("express");
 const cors = require("cors");
-const bodyParser = require("body-parser");
 const nodemailer = require("nodemailer");
-const { createAccount, calendarQuery, calendarObject } = require("dav");
-const https = require("https");
+const { google } = require("googleapis");
 
 require("dotenv").config();
 
 const app = express();
+app.use(express.json());
 app.use(cors());
-app.use(bodyParser.json());
 
-const CALDAV_URL = "https://caldav.icloud.com/";
+// ------------------------------------------------------
+// GOOGLE AUTH SETUP (Service Account)
+// ------------------------------------------------------
+const serviceAccount = {
+  type: "service_account",
+  project_id: process.env.GOOGLE_PROJECT_ID,
+  private_key_id: process.env.GOOGLE_PRIVATE_KEY_ID,
+  private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+  client_email: process.env.GOOGLE_CLIENT_EMAIL,
+  client_id: process.env.GOOGLE_CLIENT_ID,
+};
 
-app.post("/api/book", async (req, res) => {
-  const { service, size, name, phone, email, date, time } = req.body;
+const SCOPES = ["https://www.googleapis.com/auth/calendar"];
+const auth = new google.auth.JWT(
+  serviceAccount.client_email,
+  null,
+  serviceAccount.private_key,
+  SCOPES
+);
 
+const calendar = google.calendar({ version: "v3", auth });
+
+// ------------------------------------------------------
+// RULES
+// ------------------------------------------------------
+const WORK_START = 8; // 8 AM
+const WORK_END = 18;  // 6 PM
+const CLOSED_DAYS = [0, 1]; // Sunday (0), Monday (1)
+
+// VEHICLE SIZES (index 0–4)
+const DURATIONS = {
+  rejuvenation: [4.5, 5, 5.5, 6, 6],
+  rejuvenationInterior: [3, 3, 4, 4.5, 5],
+  rejuvenationExterior: [2, 2, 2.25, 2.5, 3],
+  spa: [8, 8.75, 9.5, 12, 14],
+  spaInterior: [4, 4, 5, 6.5, 7.5],
+  spaExterior: [3, 3, 3.5, 3.75, 4.25],
+  correction1: [7, 7.5, 8.5, 10.5, 10.5],
+  correction2: [9, 10, 11, 12.5, 15],
+  ceramic: 24 // 3 business days (8 hr days)
+};
+
+// ------------------------------------------------------
+// CHECK AVAILABILITY AGAINST GOOGLE CALENDAR
+// ------------------------------------------------------
+async function isAvailable(start, end) {
+  const events = await calendar.events.list({
+    calendarId: process.env.GOOGLE_CALENDAR_ID,
+    timeMin: start.toISOString(),
+    timeMax: end.toISOString(),
+    singleEvents: true,
+    orderBy: "startTime",
+  });
+
+  return events.data.items.length === 0;
+}
+
+// ------------------------------------------------------
+// CREATE EVENT
+// ------------------------------------------------------
+async function createEvent(booking) {
+  return calendar.events.insert({
+    calendarId: process.env.GOOGLE_CALENDAR_ID,
+    requestBody: {
+      summary: `${booking.serviceName} • ${booking.make} ${booking.model} (${booking.size})`,
+      description: `
+Customer: ${booking.name}
+Phone: ${booking.phone}
+Email: ${booking.email}
+Address: ${booking.address}
+Type: ${booking.dropoff ? "Drop-Off" : "Mobile"}
+      `,
+      start: { dateTime: booking.start },
+      end: { dateTime: booking.end },
+    },
+  });
+}
+
+// ------------------------------------------------------
+// EMAILS → Customer + You
+// ------------------------------------------------------
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS, // Gmail App Password
+  },
+});
+
+// ------------------------------------------------------
+// API ROUTES
+// ------------------------------------------------------
+
+// GET AVAILABLE TIMES
+app.post("/api/availability", async (req, res) => {
   try {
-    const start = new Date(`${date}T${time}:00`);
-    const end = new Date(start.getTime() + 2 * 60 * 60 * 1000); // 2 hours
+    const { date, hours } = req.body;
 
-    // Authenticate to Apple CalDAV
-    const account = await createAccount({
-      server: CALDAV_URL,
-      credentials: {
-        username: process.env.APPLE_ID,
-        password: process.env.APPLE_APP_PASSWORD,
-      },
-      loadCollections: true,
-      loadObjects: false,
+    const day = new Date(date);
+    const dow = day.getDay();
+
+    if (CLOSED_DAYS.includes(dow))
+      return res.json({ times: [] });
+
+    const available = [];
+
+    for (let hour = WORK_START; hour <= WORK_END - hours; hour++) {
+      const start = new Date(date);
+      start.setHours(hour, 0, 0, 0);
+
+      const end = new Date(start);
+      end.setHours(start.getHours() + hours);
+
+      const free = await isAvailable(start, end);
+
+      if (free) available.push({ start, end });
+    }
+
+    res.json({ times: available });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// BOOKING
+app.post("/api/book", async (req, res) => {
+  try {
+    const booking = req.body;
+
+    // Create event on calendar
+    await createEvent(booking);
+
+    // Send confirmation to customer
+    transporter.sendMail({
+      to: booking.email,
+      from: process.env.EMAIL_USER,
+      subject: "Holy City Auto Spa — Booking Confirmed",
+      html: `
+      <h2>You're Booked!</h2>
+      <p>Thanks ${booking.name}, your appointment is confirmed.</p>
+      <p><strong>${booking.serviceName}</strong></p>
+      <p>${booking.make} ${booking.model} (${booking.size})</p>
+      <p>${booking.start} → ${booking.end}</p>
+      <p>Address: ${booking.address}</p>
+      `,
     });
 
-    // Find the default calendar
-    const calendar = account.calendars.find((c) => c.components.includes("VEVENT"));
-    if (!calendar) throw new Error("No calendar found");
-
-    // Build ICS event
-    const ics = `
-BEGIN:VCALENDAR
-VERSION:2.0
-PRODID:-//Holy City Auto Spa//Booking System//EN
-BEGIN:VEVENT
-UID:${Date.now()}@holycityautospa
-DTSTAMP:${start.toISOString().replace(/[-:]/g, "").split(".")[0] + "Z"}
-DTSTART:${start.toISOString().replace(/[-:]/g, "").split(".")[0] + "Z"}
-DTEND:${end.toISOString().replace(/[-:]/g, "").split(".")[0] + "Z"}
-SUMMARY:${service} – ${name}
-DESCRIPTION:Vehicle: ${size}\\nPhone: ${phone}\\nEmail: ${email}
-END:VEVENT
-END:VCALENDAR`;
-
-    // Upload event to Apple Calendar
-    await calendarObject.create({
-      url: calendar.url + `${Date.now()}.ics`,
-      data: ics,
-      headers: { "Content-Type": "text/calendar" },
-    });
-
-    // Email confirmation
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-      },
-    });
-
-    await transporter.sendMail({
-      from: `"Holy City Auto Spa" <Timothy@holycityautospa.com>`,
-      to: email,
-      subject: "Holy City Auto Spa – Appointment Confirmed",
-      text: `Thanks for booking, ${name}!\n
-Service: ${service}
-Vehicle: ${size}
-Date: ${date} at ${time}
-
-We’ll see you soon!`,
+    // Send notification to you
+    transporter.sendMail({
+      to: process.env.EMAIL_USER,
+      from: process.env.EMAIL_USER,
+      subject: "New Booking — Holy City Auto Spa",
+      html: `
+      <h2>New Booking Received</h2>
+      <p>${booking.name} booked ${booking.serviceName}</p>
+      <p>${booking.make} ${booking.model} (${booking.size})</p>
+      <p>${booking.start}</p>
+      <p>${booking.address}</p>
+      `,
     });
 
     res.json({ success: true });
   } catch (err) {
-    console.error("Booking error:", err);
-    res.status(500).json({ success: false, error: err.message });
+    console.log(err);
+    res.status(500).json({ error: err.message });
   }
 });
 
+// ROOT — Status
 app.get("/", (req, res) => {
   res.send("Holy City Auto Spa Booking API is Running");
 });
 
-app.listen(3000, () => console.log("Server running on port 3000"));
+// ------------------------------------------------------
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("Server running on port " + PORT));
