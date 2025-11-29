@@ -10,15 +10,18 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
+// Apple CalDAV server
 const CALDAV_URL = "https://caldav.icloud.com/";
 
 app.post("/api/book", async (req, res) => {
   const { service, size, name, phone, email, date, time } = req.body;
 
   try {
+    // Build start and end time
     const startDate = new Date(`${date}T${time}:00`);
-    const endDate = new Date(startDate.getTime() + 2 * 60 * 60 * 1000);
+    const endDate = new Date(startDate.getTime() + 2 * 60 * 60 * 1000); // 2 hours default
 
+    // Add event to Apple Calendar using CalDAV
     await calDav.createEvent({
       url: CALDAV_URL,
       username: process.env.APPLE_ID,
@@ -27,34 +30,19 @@ app.post("/api/book", async (req, res) => {
         start: startDate,
         end: endDate,
         summary: `${service} – ${name}`,
-        description: `Vehicle: ${size}\nPhone: ${phone}\nEmail: ${email}`,
+        description: `Vehicle: ${size}\nPhone: ${phone}\nEmail: ${email}\nService: ${service}`,
       },
     });
 
+    // Email transporter using Gmail App Password
     let transporter = nodemailer.createTransport({
       service: "gmail",
       auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
+        user: process.env.EMAIL_USER,       // your gmail user
+        pass: process.env.EMAIL_PASS        // gmail app password
       },
     });
 
+    // Send confirmation email to client
     await transporter.sendMail({
-      to: email,
-      subject: "Holy City Auto Spa – Appointment Confirmed",
-      text: `Thanks for booking, ${name}!\n\nService: ${service}\nVehicle: ${size}\nDate: ${date} at ${time}\n\nWe’ll see you soon!`,
-    });
-
-    res.json({ success: true });
-
-  } catch (err) {
-    console.error(err);
-    res.json({ success: false, error: err.message });
-  }
-});
-
-app.get("/", (req, res) => {
-  res.send("Holy City Auto Spa Booking API is Running");
-});
-
-app.listen(3000, () => console.log("Server running on port 3000"));
+      from: `"Holy City Auto Spa" <Timot
