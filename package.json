@@ -1,6 +1,7 @@
 {
-  "name": "hcas-booking-backend",
+  "name": "has-booking",
   "version": "1.0.0",
+  "description": "Holy City Auto Spa booking backend",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -9,9 +10,9 @@
     "express": "^4.18.2",
     "cors": "^2.8.5",
     "body-parser": "^1.20.2",
-    "dav": "^1.8.0",
-    "nodemailer": "^6.9.4",
-    "dotenv": "^16.3.1"
+    "googleapis": "^131.0.0",
+    "google-auth-library": "^9.0.0",
+    "dotenv": "^16.4.5",
+    "axios": "^1.6.0"
   }
 }
-
